@@ -21,7 +21,6 @@ from selenium.webdriver.edge.options import Options as EdgeOptions
 from selenium.common.exceptions import SessionNotCreatedException
 from selenium.webdriver.chrome.service import Service
 from urllib.parse import urlparse
-from config import EMAIL, PASSWORD
 
 USE_PREMIUM: bool = True  # Set to True if you want to login to Substack and convert paid for posts
 BASE_SUBSTACK_URL: str = "https://www.thefitzwilliam.com/"  # Substack you want to convert to markdown
@@ -70,9 +69,10 @@ def generate_html_file(author_name: str) -> None:
 
 
 class BaseSubstackScraper(ABC):
-    def __init__(self, base_substack_url: str, md_save_dir: str, html_save_dir: str):
+    def __init__(self, args, base_substack_url: str, md_save_dir: str, html_save_dir: str):
         if not base_substack_url.endswith("/"):
             base_substack_url += "/"
+        self.args = args
         self.base_substack_url: str = base_substack_url
 
         self.writer_name: str = extract_main_part(base_substack_url)
@@ -371,8 +371,8 @@ class BaseSubstackScraper(ABC):
 
 
 class SubstackScraper(BaseSubstackScraper):
-    def __init__(self, base_substack_url: str, md_save_dir: str, html_save_dir: str):
-        super().__init__(base_substack_url, md_save_dir, html_save_dir)
+    def __init__(self, args, base_substack_url: str, md_save_dir: str, html_save_dir: str):
+        super().__init__(args, base_substack_url, md_save_dir, html_save_dir)
 
     def get_url_soup(self, url: str) -> Optional[BeautifulSoup]:
         """
@@ -392,6 +392,7 @@ class SubstackScraper(BaseSubstackScraper):
 class PremiumSubstackScraper(BaseSubstackScraper):
     def __init__(
         self,
+        args,
         base_substack_url: str,
         md_save_dir: str,
         html_save_dir: str,
@@ -400,7 +401,7 @@ class PremiumSubstackScraper(BaseSubstackScraper):
         edge_driver_path: str = '',
         user_agent: str = ''
     ) -> None:
-        super().__init__(base_substack_url, md_save_dir, html_save_dir)
+        super().__init__(args, base_substack_url, md_save_dir, html_save_dir)
 
         options = EdgeOptions()
         if headless:
@@ -459,8 +460,8 @@ class PremiumSubstackScraper(BaseSubstackScraper):
         # Email and password
         email = self.driver.find_element(By.NAME, "email")
         password = self.driver.find_element(By.NAME, "password")
-        email.send_keys(EMAIL)
-        password.send_keys(PASSWORD)
+        email.send_keys(self.args.email)
+        password.send_keys(self.args.password)
 
         # Find the submit button and click it.
         submit = self.driver.find_element(By.XPATH, "//*[@id=\"substack-login\"]/div[2]/div[2]/form/button")
@@ -494,6 +495,15 @@ class PremiumSubstackScraper(BaseSubstackScraper):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Scrape a Substack site.")
+    parser.add_argument(
+        "--config", type=str, help="JSON config file with email and password."
+    )
+    parser.add_argument(
+        "--email", type=str, help="Login E-Mail."
+    )
+    parser.add_argument(
+        "--password", type=str, help="Login password."
+    )
     parser.add_argument(
         "-u", "--url", type=str, help="The base URL of the Substack site to scrape."
     )
@@ -556,17 +566,29 @@ def main():
     if args.html_directory is None:
         args.html_directory = BASE_HTML_DIR
 
+    if args.config:
+        with open(args.config) as f:
+            config = json.load(f)
+        args.email = config["email"]
+        args.password = config["password"]
+        # TODO more
+
+    assert args.email
+    assert args.password
+
     if args.url:
         if args.premium:
             scraper = PremiumSubstackScraper(
-                args.url,
+                args=args,
+                base_substack_url=args.url,
                 headless=args.headless,
                 md_save_dir=args.directory,
                 html_save_dir=args.html_directory
             )
         else:
             scraper = SubstackScraper(
-                args.url,
+                args=args,
+                base_substack_url=args.url,
                 md_save_dir=args.directory,
                 html_save_dir=args.html_directory
             )
@@ -575,6 +597,7 @@ def main():
     else:  # Use the hardcoded values at the top of the file
         if USE_PREMIUM:
             scraper = PremiumSubstackScraper(
+                args=args,
                 base_substack_url=BASE_SUBSTACK_URL,
                 md_save_dir=args.directory,
                 html_save_dir=args.html_directory,
@@ -583,6 +606,7 @@ def main():
             )
         else:
             scraper = SubstackScraper(
+                args=args,
                 base_substack_url=BASE_SUBSTACK_URL,
                 md_save_dir=args.directory,
                 html_save_dir=args.html_directory
