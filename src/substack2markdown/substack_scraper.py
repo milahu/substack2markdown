@@ -31,6 +31,7 @@ BASE_SUBSTACK_URL: str = "https://www.thefitzwilliam.com/"  # Substack you want 
 BASE_MD_DIR: str = "substack_md_files"  # Name of the directory we'll save the .md essay files
 BASE_HTML_DIR: str = "substack_html_pages"  # Name of the directory we'll save the .html essay files
 BASE_IMAGE_DIR: str = "substack_images"
+BASE_JSON_DIR: str = "substack_json"
 ASSETS_DIR: str = os.path.dirname(__file__) + "/assets"
 HTML_TEMPLATE: str = "author_template.html"  # HTML template to use for the author page
 JSON_DATA_DIR: str = "data"
@@ -132,6 +133,8 @@ class BaseSubstackScraper(ABC):
         self.md_save_dir: str = md_save_dir
         self.html_save_dir: str = f"{html_save_dir}/{self.writer_name}"
 
+        self.args.json_directory += f"/{self.writer_name}"
+
         if not os.path.exists(md_save_dir):
             os.makedirs(md_save_dir)
             print(f"Created md directory {md_save_dir}")
@@ -141,6 +144,9 @@ class BaseSubstackScraper(ABC):
 
         if not self.args.no_images:
             os.makedirs(self.args.image_directory, exist_ok=True)
+
+        if not self.args.no_json:
+            os.makedirs(self.args.json_directory, exist_ok=True)
 
         self.keywords: List[str] = ["about", "archive", "podcast"]
         self.post_urls: List[str] = self.get_all_post_urls()
@@ -535,12 +541,11 @@ class BaseSubstackScraper(ABC):
                         # comments_url = "https://willstorr.substack.com/p/scamming-substack/comments" # test
                         comments_soup = await self.get_url_soup(comments_url)
                         comments_preloads = await self.get_window_preloads(comments_soup)
-                        if 0:
-                            # debug
-                            # TODO add option to write the original "preloads" data to json files
-                            with open("comments_preloads.json", "w") as f:
-                                json.dump(comments_preloads, f, indent=2)
-                            raise 5
+                        if not self.args.no_json:
+                            json_filename = self.get_filename_from_url(url, filetype=".comments.json")
+                            json_filepath = os.path.join(self.args.json_directory, json_filename)
+                            _json = json.dumps(comments_preloads, ensure_ascii=False, separators=(',', ':'))
+                            self.save_to_file(json_filepath, _json)
                         comments_num = self.count_comments(comments_preloads)
                         if comments_num > 0:
                             comments_html = self.render_comments_html(comments_preloads)
@@ -560,6 +565,13 @@ class BaseSubstackScraper(ABC):
                             md += comments_html
 
                     self.save_to_file(md_filepath, md)
+
+                    if not self.args.no_json:
+                        post_preloads = await self.get_window_preloads(soup)
+                        json_filename = self.get_filename_from_url(url, filetype=".post.json")
+                        json_filepath = os.path.join(self.args.json_directory, json_filename)
+                        _json = json.dumps(post_preloads, ensure_ascii=False, separators=(',', ':'))
+                        self.save_to_file(json_filepath, _json)
 
                     # Convert markdown to HTML and save
                     html_content = self.md_to_html(md)
@@ -917,6 +929,12 @@ def parse_args() -> argparse.Namespace:
         help=f"The directory to save scraped image files. Default: {BASE_IMAGE_DIR!r}",
     )
     parser.add_argument(
+        "--json-directory", # args.json_directory
+        type=str,
+        default=BASE_JSON_DIR,
+        help=f"The directory to save scraped JSON files. Default: {BASE_JSON_DIR!r}",
+    )
+    parser.add_argument(
         "--no-images", # args.no_images
         action="store_true",
         help=f"Do not download images.",
@@ -925,6 +943,11 @@ def parse_args() -> argparse.Namespace:
         "--no-comments", # args.no_comments
         action="store_true",
         help=f"Do not download comments.",
+    )
+    parser.add_argument(
+        "--no-json", # args.no_json
+        action="store_true",
+        help=f"Do not write JSON files.",
     )
 
     return parser.parse_args()
