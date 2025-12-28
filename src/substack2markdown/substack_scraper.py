@@ -413,9 +413,19 @@ class BaseSubstackScraper(ABC):
             # NOTE user IDs are constant, user handles are variable
             # when i change my user handle
             # then other users can use my old user handle
-            buf.write(f'<a class="user" href="https://substack.com/profile/{comment["user_id"]}">')
-            buf.write(comment["name"]) # human-readable username
-            buf.write('</a>\n')
+            if not comment["user_id"] is None:
+                buf.write(f'<a class="user" href="https://substack.com/profile/{comment["user_id"]}">')
+
+            if not comment["name"] is None:
+                buf.write(comment["name"]) # human-readable username
+            else:
+                # Comment removed
+                buf.write("null")
+
+            if not comment["user_id"] is None:
+               buf.write('</a>\n')
+            else:
+               buf.write('\n')
 
             other_pub = comment["metadata"].get("author_on_other_pub")
             if other_pub:
@@ -439,7 +449,21 @@ class BaseSubstackScraper(ABC):
 
             buf.write('<blockquote>\n')
             buf.write('\n')
-            buf.write(render_comment_body(comment["body"]) + '\n')
+
+            if comment["body"] is None:
+                # Comment removed
+                status = comment.get("status")
+                if status is None:
+                    buf.write('(Comment removed)\n')
+                else:
+                    # "moderator_removed", ...
+                    buf.write('(status:' + status + ')\n')
+                # TODO comment["bans"]
+                # TODO comment["suppressed"]
+                # TODO comment["user_banned"]
+                # TODO comment["user_banned_for_comment"]
+            else:
+                buf.write(render_comment_body(comment["body"]) + '\n')
 
             for child_comment in comment["children"]:
                 buf.write('\n')
