@@ -178,7 +178,8 @@ class BaseSubstackScraper(ABC):
         if not isinstance(content, str):
             raise ValueError("content must be a string")
 
-        if os.path.exists(filepath):
+        # if os.path.exists(filepath):
+        if False:
             print(f"File already exists: {filepath}")
             return
 
@@ -351,6 +352,8 @@ class BaseSubstackScraper(ABC):
                 md_filepath = os.path.join(self.md_save_dir, md_filename)
                 html_filepath = os.path.join(self.html_save_dir, html_filename)
 
+                # if not os.path.exists(md_filepath):
+                if True:
                     soup = await self.get_url_soup(url)
                     if soup is None:
                         total += 1
