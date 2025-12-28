@@ -4,7 +4,9 @@ import os
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
 from time import sleep
-
+import asyncio
+import atexit
+import signal
 
 import html2text
 import markdown
@@ -14,12 +16,8 @@ from datetime import datetime
 from tqdm import tqdm
 from xml.etree import ElementTree as ET
 
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from webdriver_manager.microsoft import EdgeChromiumDriverManager
-from selenium.webdriver.edge.options import Options as EdgeOptions
-from selenium.common.exceptions import SessionNotCreatedException
-from selenium.webdriver.chrome.service import Service
+from selenium_driverless import webdriver
+from selenium_driverless.types.by import By
 from urllib.parse import urlparse
 
 USE_PREMIUM: bool = True  # Set to True if you want to login to Substack and convert paid for posts
@@ -70,6 +68,15 @@ def generate_html_file(args, author_name: str) -> None:
 
 
 class BaseSubstackScraper(ABC):
+    def __await__(self):
+        return self._async_init().__await__()
+
+    async def __aenter__(self):
+        return await self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        pass
+
     def __init__(self, args, base_substack_url: str, md_save_dir: str, html_save_dir: str):
         if not base_substack_url.endswith("/"):
             base_substack_url += "/"
@@ -91,6 +98,10 @@ class BaseSubstackScraper(ABC):
 
         self.keywords: List[str] = ["about", "archive", "podcast"]
         self.post_urls: List[str] = self.get_all_post_urls()
+
+    async def _async_init(self):
+        self._loop = asyncio.get_running_loop()
+        return self
 
     def get_all_post_urls(self) -> List[str]:
         """
@@ -326,7 +337,7 @@ class BaseSubstackScraper(ABC):
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(essays_data, f, ensure_ascii=False, indent=4)
 
-    def scrape_posts(self, num_posts_to_scrape: int = 0) -> None:
+    async def scrape_posts(self, num_posts_to_scrape: int = 0) -> None:
         """
         Iterates over all posts and saves them as markdown and html files
         """
@@ -340,8 +351,7 @@ class BaseSubstackScraper(ABC):
                 md_filepath = os.path.join(self.md_save_dir, md_filename)
                 html_filepath = os.path.join(self.html_save_dir, html_filename)
 
-                if not os.path.exists(md_filepath):
-                    soup = self.get_url_soup(url)
+                    soup = await self.get_url_soup(url)
                     if soup is None:
                         total += 1
                         continue
@@ -398,100 +408,109 @@ class PremiumSubstackScraper(BaseSubstackScraper):
         md_save_dir: str,
         html_save_dir: str,
         headless: bool = False,
-        edge_path: str = '',
-        edge_driver_path: str = '',
+        chromium_path: str = '',
         user_agent: str = ''
     ) -> None:
         super().__init__(args, base_substack_url, md_save_dir, html_save_dir)
 
-        options = EdgeOptions()
-        if headless:
-            # modern headless flag (works better with recent Edge/Chromium)
-            options.add_argument("--headless=new")
-        if edge_path:
-            options.binary_location = edge_path
-        if user_agent:
-            options.add_argument(f"user-agent={user_agent}")
-    
-        if isinstance(options, EdgeOptions):
-            os.environ.setdefault("SE_DRIVER_MIRROR_URL", "https://msedgedriver.microsoft.com")
-        elif isinstance(options, ChromeOptions):
-            os.environ.setdefault("SE_DRIVER_MIRROR_URL", "https://chromedriver.storage.googleapis.com")
-
-        
         self.driver = None
 
-        # 1) Prefer an explicit driver path (manual download)
-        if edge_driver_path and os.path.exists(edge_driver_path):
-            service = Service(executable_path=edge_driver_path)
-            self.driver = webdriver.Edge(service=service, options=options)
-        else:
-            # 2) Try webdriver_manager (needs network/DNS)
+        def exit_handler(signum, frame):
+            print()
+            print(f"exit_handler: received signal {signum}")
             try:
-                service = Service(EdgeChromiumDriverManager().install())
-                self.driver = webdriver.Edge(service=service, options=options)
-            except Exception as e:
-                print("webdriver_manager could not download msedgedriver (network/DNS). Falling back to Selenium Manager.")
-                # 3) Selenium Manager fallback (still needs network; but avoids webdriver_manager)
+                asyncio.get_event_loop().create_task(self._cleanup_sync())
+            except Exception:
+                pass
+            raise SystemExit(0)
+
+        signal.signal(signal.SIGINT, exit_handler)
+        signal.signal(signal.SIGTERM, exit_handler)
+
+        atexit.register(self._cleanup_sync)
+
+        options = webdriver.ChromeOptions()
+        self.chrome_options = options
+        if headless:
+            # modern headless flag (works better with recent Chromium)
+            options.add_argument("--headless=new")
+        if chromium_path:
+            options.binary_location = chromium_path
+        if user_agent:
+            options.add_argument(f"user-agent={user_agent}")
+
+    async def _async_init(self):
+        self._loop = asyncio.get_running_loop()
+
+        await self._start_driver()
+        await self.login()
+        return self
+
+    async def _start_driver(self):
+        self.driver = await webdriver.Chrome(options=self.chrome_options)
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.close()
+
+    async def close(self) -> None:
+        if self.driver:
+            await self.driver.quit()
+
+    def _cleanup_sync(self):
+        try:
+            if not self.driver:
+                return
+            proc = self.driver._process
+            if proc and proc.poll() is None:
+                proc.terminate()
                 try:
-                    # IMPORTANT: ensure no stale driver in PATH (e.g. C:\Windows\msedgedriver.exe v138)
-                    self.driver = webdriver.Edge(options=options)
-                except SessionNotCreatedException as se:
-                    raise RuntimeError(
-                        "Selenium Manager fallback failed due to driver/browser mismatch.\n"
-                        "Fix by either: (a) removing stale msedgedriver in PATH (e.g. C:\\Windows\\msedgedriver.exe) and replace with a fresh one downloaded from https://developer.microsoft.com/en-us/microsoft-edge/tools/webdriver, "
-                        "or (b) pass --edge-driver-path to a manually downloaded driver that matches your Edge version."
-                    ) from se
+                    proc.wait(timeout=1)
+                except Exception:
+                    proc.kill()
+        except Exception as exc:
+            print("_cleanup_sync failed:", exc)
 
-        self.login()
+    async def login(self):
+        await self.driver.get("https://substack.com/sign-in")
+        await asyncio.sleep(2)
 
-    def login(self) -> None:
-        """
-        This method logs into Substack using Selenium
-        """
-        self.driver.get("https://substack.com/sign-in")
-        sleep(3)
-
-        signin_with_password = self.driver.find_element(
-            By.XPATH, "//a[@class='login-option substack-login__login-option']"
+        signin = await self.driver.find_element(
+            By.XPATH, "//a[contains(@class,'login-option')]"
         )
-        signin_with_password.click()
-        sleep(3)
+        await signin.click()
 
-        # Email and password
-        email = self.driver.find_element(By.NAME, "email")
-        password = self.driver.find_element(By.NAME, "password")
-        email.send_keys(self.args.email)
-        password.send_keys(self.args.password)
+        await asyncio.sleep(2)
 
-        # Find the submit button and click it.
-        submit = self.driver.find_element(By.XPATH, "//*[@id=\"substack-login\"]/div[2]/div[2]/form/button")
-        submit.click()
-        sleep(30)  # Wait for the page to load
+        email = await self.driver.find_element(By.NAME, "email")
+        password = await self.driver.find_element(By.NAME, "password")
 
-        if self.is_login_failed():
-            raise Exception(
-                "Warning: Login unsuccessful. Please check your email and password, or your account status.\n"
-                "Use the non-premium scraper for the non-paid posts. \n"
-                "If running headless, run non-headlessly to see if blocked by Captcha."
-            )
+        await email.send_keys(self.args.email)
+        await password.send_keys(self.args.password)
 
-    def is_login_failed(self) -> bool:
+        submit = await self.driver.find_element(
+            By.XPATH, "//*[@id='substack-login']//form//button"
+        )
+        await submit.click()
+
+        await asyncio.sleep(8)
+
+        if await self.is_login_failed():
+            raise RuntimeError("Substack login failed")
+
+    async def is_login_failed(self):
         """
         Check for the presence of the 'error-container' to indicate a failed login attempt.
         """
-        error_container = self.driver.find_elements(By.ID, 'error-container')
-        return len(error_container) > 0 and error_container[0].is_displayed()
+        elements = await self.driver.find_elements(By.ID, "error-container")
+        return bool(elements)
 
-    def get_url_soup(self, url: str) -> BeautifulSoup:
+    async def get_url_soup(self, url: str):
         """
         Gets soup from URL using logged in selenium driver
         """
-        try:
-            self.driver.get(url)
-            return BeautifulSoup(self.driver.page_source, "html.parser")
-        except Exception as e:
-            raise ValueError(f"Error fetching page: {e}") from e
+        await self.driver.get(url)
+        html = await self.driver.page_source
+        return BeautifulSoup(html, "html.parser")
 
 
 def parse_args() -> argparse.Namespace:
@@ -548,16 +567,10 @@ def parse_args() -> argparse.Namespace:
         "Scraper.",
     )
     parser.add_argument(
-        "--edge-path",
+        "--chromium-path", # args.chromium_path
         type=str,
         default="",
-        help='Optional: The path to the Edge browser executable (i.e. "path_to_msedge.exe").',
-    )
-    parser.add_argument(
-        "--edge-driver-path",
-        type=str,
-        default="",
-        help='Optional: The path to the Edge WebDriver executable (i.e. "path_to_msedgedriver.exe").',
+        help='Optional: The path to the Chromium browser executable (i.e. "path/to/chromium").',
     )
     parser.add_argument(
         "--user-agent",
@@ -576,7 +589,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main():
+async def async_main():
     args = parse_args()
 
     if args.config:
@@ -594,7 +607,7 @@ def main():
 
     if True:
         if args.premium:
-            scraper = PremiumSubstackScraper(
+            scraper = await PremiumSubstackScraper(
                 args=args,
                 base_substack_url=args.url,
                 headless=args.headless,
@@ -602,13 +615,19 @@ def main():
                 html_save_dir=args.html_directory
             )
         else:
-            scraper = SubstackScraper(
+            scraper = await SubstackScraper(
                 args=args,
                 base_substack_url=args.url,
                 md_save_dir=args.directory,
                 html_save_dir=args.html_directory
             )
-        scraper.scrape_posts(args.number)
+
+        await scraper.scrape_posts(args.number)
+        await scraper.close()
+
+
+def main():
+    asyncio.run(async_main())
 
 
 if __name__ == "__main__":
