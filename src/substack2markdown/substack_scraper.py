@@ -578,6 +578,7 @@ class BaseSubstackScraper(ABC):
                     print(f"File already exists: {md_filepath}")
             except Exception as e:
                 print(f"Error scraping post: {e}")
+                # raise e # debug
             count += 1
             if num_posts_to_scrape != 0 and count == num_posts_to_scrape:
                 break
