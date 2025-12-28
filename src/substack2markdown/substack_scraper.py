@@ -1,6 +1,13 @@
 import argparse
 import json
 import os
+import io
+import re
+import base64
+import hashlib
+import mimetypes
+from pathlib import Path
+from urllib.parse import urlparse, unquote
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
 from time import sleep
@@ -18,16 +25,52 @@ from xml.etree import ElementTree as ET
 
 from selenium_driverless import webdriver
 from selenium_driverless.types.by import By
-from urllib.parse import urlparse
 
 USE_PREMIUM: bool = True  # Set to True if you want to login to Substack and convert paid for posts
 BASE_SUBSTACK_URL: str = "https://www.thefitzwilliam.com/"  # Substack you want to convert to markdown
 BASE_MD_DIR: str = "substack_md_files"  # Name of the directory we'll save the .md essay files
 BASE_HTML_DIR: str = "substack_html_pages"  # Name of the directory we'll save the .html essay files
+BASE_IMAGE_DIR: str = "substack_images"
 ASSETS_DIR: str = os.path.dirname(__file__) + "/assets"
 HTML_TEMPLATE: str = "author_template.html"  # HTML template to use for the author page
 JSON_DATA_DIR: str = "data"
 NUM_POSTS_TO_SCRAPE: int = 3  # Set to 0 if you want all posts
+
+
+def count_images_in_markdown(md_content: str) -> int:
+    """Count number of Substack CDN image URLs in markdown content."""
+    # [![](https://substackcdn.com/image/fetch/x.png)](https://substackcdn.com/image/fetch/x.png)
+    # regex lookahead: match "...)" but not "...)]" suffix
+    pattern = re.compile(r'\(https://substackcdn\.com/image/fetch/[^\s\)]+\)(?=[^\]]|$)')
+    matches = re.findall(pattern, md_content)
+    return len(matches)
+
+
+def sanitize_image_filename(url: str) -> str:
+    """Create a safe filename from URL or content."""
+    # Extract original filename from CDN URL
+    if "substackcdn.com" in url:
+        # Get the actual image URL after the CDN parameters
+        original_url = unquote(url.split("/https%3A%2F%2F")[1])
+        filename = original_url.split("/")[-1]
+    else:
+        filename = url.split("/")[-1]
+
+    # Remove invalid characters
+    filename = re.sub(r'[<>:"/\\|?*]', '', filename)
+
+    # If filename is too long or empty, create hash-based name
+    if len(filename) > 100 or not filename:
+        hash_object = hashlib.md5(url.encode())
+        ext = mimetypes.guess_extension(requests.head(url).headers.get('content-type', '')) or '.jpg'
+        filename = f"{hash_object.hexdigest()}{ext}"
+
+    return filename
+
+
+def get_post_slug(url: str) -> str:
+    match = re.search(r'/p/([^/]+)', url)
+    return match.group(1) if match else 'unknown_post'
 
 
 def extract_main_part(url: str) -> str:
@@ -95,6 +138,9 @@ class BaseSubstackScraper(ABC):
         if not os.path.exists(self.html_save_dir):
             os.makedirs(self.html_save_dir)
             print(f"Created html directory {self.html_save_dir}")
+
+        if not self.args.no_images:
+            os.makedirs(self.args.image_directory, exist_ok=True)
 
         self.keywords: List[str] = ["about", "archive", "podcast"]
         self.post_urls: List[str] = self.get_all_post_urls()
@@ -359,6 +405,13 @@ class BaseSubstackScraper(ABC):
                         total += 1
                         continue
                     title, subtitle, like_count, date, md = self.extract_post_data(soup)
+
+                    if not self.args.no_images:
+                        total_images = count_images_in_markdown(md)
+                        post_slug = get_post_slug(url)
+                        with tqdm(total=total_images, desc=f"Downloading images for {post_slug}", leave=False) as img_pbar:
+                            md = await self.process_markdown_images(md, self.writer_name, post_slug, img_pbar)
+
                     self.save_to_file(md_filepath, md)
 
                     # Convert markdown to HTML and save
@@ -382,6 +435,56 @@ class BaseSubstackScraper(ABC):
                 break
         self.save_essays_data_to_json(essays_data=essays_data)
         generate_html_file(self.args, author_name=self.writer_name)
+
+    async def download_image(
+            self,
+            url: str,
+            save_path: Path,
+            pbar: Optional[tqdm] = None
+        ) -> Optional[str]:
+        """Download image from URL and save to path."""
+        try:
+            response = requests.get(url, stream=True)
+            if response.status_code == 200:
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(save_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                if pbar:
+                    pbar.update(1)
+                return str(save_path)
+        except Exception as exc:
+            if pbar:
+                pbar.write(f"Error downloading image {url}: {str(exc)}")
+            # raise exc # debug
+        return None
+
+    async def process_markdown_images(
+            self,
+            md_content: str,
+            author: str,
+            post_slug: str,
+            pbar=None
+        ) -> str:
+        """Process markdown content to download images and update references."""
+        image_dir = Path(self.args.image_directory) / author / post_slug
+        # [![](https://substackcdn.com/image/fetch/x.png)](https://substackcdn.com/image/fetch/x.png)
+        pattern = re.compile(r'\(https://substackcdn\.com/image/fetch/[^\s\)]+\)')
+        buf = io.StringIO()
+        last_end = 0
+        for match in pattern.finditer(md_content):
+            buf.write(md_content[last_end:match.start()])
+            url = match.group(0).strip("()")
+            filename = sanitize_image_filename(url)
+            save_path = image_dir / filename
+            if not save_path.exists():
+                await self.download_image(url, save_path, pbar)
+            rel_path = os.path.relpath(save_path, Path(self.args.directory) / author)
+            buf.write(f"({rel_path})")
+            last_end = match.end()
+        buf.write(md_content[last_end:])
+        return buf.getvalue()
 
 
 class SubstackScraper(BaseSubstackScraper):
@@ -515,6 +618,76 @@ class PremiumSubstackScraper(BaseSubstackScraper):
         html = await self.driver.page_source
         return BeautifulSoup(html, "html.parser")
 
+    async def download_image_FIXME(
+            self,
+            url: str,
+            save_path: Path,
+            pbar: Optional[tqdm] = None
+        ) -> Optional[str]:
+        """Download image using selenium_driverless"""
+
+        # NOTE for now this works with the default "def download_image"
+
+        # WONTFIX "fetch" fails due to CORS policy
+
+        # WONTFIX "canvas" does not return the original image bytes
+
+        # we could fetch images with CDP Network.getResponseBody
+        # but that requires lots of boilerplate code
+        # fix: use https://github.com/milahu/aiohttp_chromium
+
+        try:
+            # Execute JS fetch inside browser
+            result = await self.driver.execute_async_script(
+                """
+                const url = arguments[0];
+                const callback = arguments[arguments.length - 1];
+
+                const img = new Image();
+                img.crossOrigin = 'Anonymous'; // try to avoid CORS issues
+                img.onload = () => {
+                    try {
+                        const canvas = document.createElement('canvas');
+                        canvas.width = img.width;
+                        canvas.height = img.height;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0);
+                        const dataUrl = canvas.toDataURL('image/png'); // returns "data:image/png;base64,..."
+                        const base64 = dataUrl.split(',')[1]; // strip prefix
+                        callback({data: base64});
+                    } catch (err) {
+                        callback({error: err.message, stack: err.stack});
+                    }
+                };
+                img.onerror = (err) => {
+                    callback({error: 'Image load error', stack: err.toString()});
+                };
+                img.src = url;
+                """,
+                url
+            )
+
+            if isinstance(result, dict) and "error" in result:
+                raise RuntimeError(f"{result['error']}\nJS stack:\n{result['stack']}")
+
+            # Decode base64 to bytes
+            image_bytes = base64.b64decode(result)
+
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(save_path, "wb") as f:
+                f.write(image_bytes)
+
+            if pbar:
+                pbar.update(1)
+
+            return str(save_path)
+
+        except Exception as exc:
+            if pbar:
+                pbar.write(f"Error downloading image {url}: {exc}")
+            # raise exc # debug
+            return None
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Scrape a Substack site.")
@@ -587,6 +760,17 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=BASE_HTML_DIR,
         help=f"The directory to save scraped posts as HTML files. Default: {BASE_HTML_DIR!r}",
+    )
+    parser.add_argument(
+        "--image-directory", # args.image_directory
+        type=str,
+        default=BASE_IMAGE_DIR,
+        help=f"The directory to save scraped image files. Default: {BASE_IMAGE_DIR!r}",
+    )
+    parser.add_argument(
+        "--no-images", # args.no_images
+        action="store_true",
+        help=f"Do not download images.",
     )
 
     return parser.parse_args()
