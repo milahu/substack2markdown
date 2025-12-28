@@ -206,7 +206,7 @@ class BaseSubstackScraper(ABC):
 
         # Calculate the relative path from the HTML file to the CSS file
         html_dir = os.path.dirname(filepath)
-        css_path = os.path.relpath(args.assets_dir + "/css/essay-styles.css", html_dir)
+        css_path = os.path.relpath(self.args.assets_dir + "/css/essay-styles.css", html_dir)
         css_path = css_path.replace("\\", "/")  # Ensure forward slashes for web paths
 
         html_content = f"""
