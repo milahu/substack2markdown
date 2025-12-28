@@ -363,6 +363,98 @@ class BaseSubstackScraper(ABC):
 
         return title, subtitle, like_count, date, md_content
 
+    async def get_window_preloads(self, soup):
+        # all comments are stored in javascript
+        # <script>window._preloads = JSON.parse("{\"isEU\":true,\"language\":\"en\",...}")</script>
+        # only some comments are rendered in html
+        # with buttons to "Expand full comment" and "Load More"
+        # see also
+        # https://www.selfpublife.com/p/automatically-expand-all-substack-comments
+        window_preloads = None
+        for script_element in soup.select("script"):
+            script_text = script_element.text.strip()
+            if not script_text.startswith("window._preloads"):
+                continue
+            # pos1 = re.search(r'window._preloads\s*=\s*JSON\.parse\(', script_text).span()[1]
+            pos1 = script_text.find("(") + 1
+            pos2 = script_text.rfind(")")
+            window_preloads = json.loads(json.loads(script_text[pos1:pos2]))
+            break
+        assert window_preloads, f"not found <script>window._preloads...</script> at {url!r}"
+        return window_preloads
+
+    def count_comments(self, comments_preloads):
+
+        def count_comments_inner(comment):
+            res = 1
+            for child_comment in comment["children"]:
+                res += count_comments_inner(child_comment)
+            return res
+
+        res = 0
+        for comment in comments_preloads["initialComments"]:
+            res += count_comments_inner(comment)
+        return res
+
+    def render_comments_html(self, comments_preloads):
+
+        def render_comment_body(body):
+            body = body.strip()
+            body = "<p>" + body + "</p>"
+            body = body.replace("\n", "</p>\n<p>")
+            # TODO more?
+            return body
+
+        def render_comments_html_inner(comment, buf):
+            assert comment["type"] == "comment", f'unexpected comment type: {comment["type"]!r}'
+            buf.write(f'<details class="comment" id="{comment["id"]}" open>\n')
+            buf.write(f'<summary>\n')
+
+            # NOTE user IDs are constant, user handles are variable
+            # when i change my user handle
+            # then other users can use my old user handle
+            buf.write(f'<a class="user" href="https://substack.com/profile/{comment["user_id"]}">')
+            buf.write(comment["name"]) # human-readable username
+            buf.write('</a>\n')
+
+            other_pub = comment["metadata"].get("author_on_other_pub")
+            if other_pub:
+                # NOTE publication handles are quasi-constant:
+                # when i change my publication handle
+                # then other users cannot use my old publication handle
+                # NOTE "Changing your publication's subdomain
+                # does not automatically set up a redirect from the old subdomain to the new one."
+                buf.write(f'(<a class="pub" pub-id="{other_pub["id"]}" href="{other_pub["base_url"]}">')
+                buf.write(other_pub["name"])
+                buf.write('</a>)\n')
+
+            buf.write(comment["date"] + '\n') # "2025-05-17T06:51:39.485Z"
+
+            for reaction, reaction_count in comment["reactions"].items():
+                if reaction_count == 0: continue
+                buf.write(reaction + str(reaction_count) + '\n') # "❤123"
+                # buf.write(str(reaction_count) + reaction + '\n') # "123❤"
+
+            buf.write('</summary>\n')
+
+            buf.write('<blockquote>\n')
+            buf.write('\n')
+            buf.write(render_comment_body(comment["body"]) + '\n')
+
+            for child_comment in comment["children"]:
+                buf.write('\n')
+                render_comments_html_inner(child_comment, buf)
+            buf.write('</blockquote>\n')
+
+            buf.write('</details>\n')
+            buf.write('\n')
+
+        buf = io.StringIO()
+        # NOTE the name "initial" is misleading. all comments are stored in this array
+        # NOTE comments are sorted by likes
+        for comment in comments_preloads["initialComments"]:
+            render_comments_html_inner(comment, buf)
+        return buf.getvalue()
 
     @abstractmethod
     def get_url_soup(self, url: str) -> str:
@@ -412,6 +504,37 @@ class BaseSubstackScraper(ABC):
                         with tqdm(total=total_images, desc=f"Downloading images for {post_slug}", leave=False) as img_pbar:
                             md = await self.process_markdown_images(md, self.writer_name, post_slug, img_pbar)
 
+                    comments_html = None
+                    comments_num = None
+                    if not self.args.no_comments:
+                        comments_url = url + "/comments"
+                        # comments_url = "https://willstorr.substack.com/p/scamming-substack/comments" # test
+                        comments_soup = await self.get_url_soup(comments_url)
+                        comments_preloads = await self.get_window_preloads(comments_soup)
+                        if 0:
+                            # debug
+                            # TODO add option to write the original "preloads" data to json files
+                            with open("comments_preloads.json", "w") as f:
+                                json.dump(comments_preloads, f, indent=2)
+                            raise 5
+                        comments_num = self.count_comments(comments_preloads)
+                        if comments_num > 0:
+                            comments_html = self.render_comments_html(comments_preloads)
+                            comments_html = (
+                                '\n\n' +
+                                '<hr>\n' +
+                                # this can collide with other elements with id="comments"
+                                # '<section id="comments">\n' +
+                                '<section class="comments">\n' +
+                                '<h2>Comments</h2>\n' +
+                                '<details open>\n' +
+                                f'<summary>{comments_num} comments</summary>\n' +
+                                comments_html + '\n' +
+                                '</details>'
+                                '</section>'
+                            )
+                            md += comments_html
+
                     self.save_to_file(md_filepath, md)
 
                     # Convert markdown to HTML and save
@@ -422,6 +545,7 @@ class BaseSubstackScraper(ABC):
                         "title": title,
                         "subtitle": subtitle,
                         "like_count": like_count,
+                        "comment_count": comments_num,
                         "date": date,
                         "file_link": md_filepath,
                         "html_link": html_filepath
@@ -771,6 +895,11 @@ def parse_args() -> argparse.Namespace:
         "--no-images", # args.no_images
         action="store_true",
         help=f"Do not download images.",
+    )
+    parser.add_argument(
+        "--no-comments", # args.no_comments
+        action="store_true",
+        help=f"Do not download comments.",
     )
 
     return parser.parse_args()
