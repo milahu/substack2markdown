@@ -45,6 +45,12 @@ DEFAULT_POSTS_JSON_PATH_FORMAT = "posts.json"
 DEFAULT_POST_JSON_PATH_FORMAT = "p/$post_slug/post.json"
 DEFAULT_COMMENTS_JSON_PATH_FORMAT = "p/$post_slug/comments.json"
 
+json_dump_kwargs = dict(
+    ensure_ascii=False,
+    indent=0,
+    separators=(',', ':'),
+)
+
 def count_images_in_markdown(md_content: str) -> int:
     """Count number of Substack CDN image URLs in markdown content."""
     # [![](https://substackcdn.com/image/fetch/x.png)](https://substackcdn.com/image/fetch/x.png)
@@ -483,7 +489,7 @@ class BaseSubstackScraper(ABC):
         # sort by post_id, descending
         posts_data.sort(key=lambda p: -1*p["id"])
         with open(posts_json_path, 'w', encoding='utf-8') as f:
-            json.dump(posts_data, f, ensure_ascii=False, separators=(',', ':'))
+            json.dump(posts_data, f, **json_dump_kwargs)
 
     async def scrape_posts(self, num_posts_to_scrape: int = 0) -> None:
         """
@@ -542,7 +548,7 @@ class BaseSubstackScraper(ABC):
                                 output_directory,
                                 self.comments_json_path_template.substitute(self.format_vars)
                             )
-                            _json = json.dumps(comments_preloads, ensure_ascii=False, separators=(',', ':'))
+                            _json = json.dumps(comments_preloads, **json_dump_kwargs)
                             self.save_to_file(json_filepath, _json)
                         comments_num = self.count_comments(comments_preloads)
                         if comments_num > 0:
@@ -569,7 +575,7 @@ class BaseSubstackScraper(ABC):
                             output_directory,
                             self.post_json_path_template.substitute(self.format_vars)
                         )
-                        _json = json.dumps(post_preloads, ensure_ascii=False, separators=(',', ':'))
+                        _json = json.dumps(post_preloads, **json_dump_kwargs)
                         self.save_to_file(json_filepath, _json)
 
                     # Convert markdown to HTML and save
@@ -610,7 +616,7 @@ class BaseSubstackScraper(ABC):
             posts_data = json.load(file)
 
         # Convert JSON data to a JSON string for embedding
-        embedded_json_data = json.dumps(posts_data, ensure_ascii=False, separators=(',', ':'))
+        embedded_json_data = json.dumps(posts_data, **json_dump_kwargs)
 
         html_output_path = os.path.join(
             self.format_vars["output_directory"],
