@@ -14,6 +14,7 @@ from time import sleep
 import asyncio
 import atexit
 import signal
+import string
 
 import html2text
 import markdown
@@ -34,9 +35,15 @@ BASE_IMAGE_DIR: str = "substack_images"
 BASE_JSON_DIR: str = "substack_json"
 ASSETS_DIR: str = os.path.dirname(__file__) + "/assets"
 HTML_TEMPLATE: str = "author_template.html"  # HTML template to use for the author page
-JSON_DATA_DIR: str = "data"
 NUM_POSTS_TO_SCRAPE: int = 3  # Set to 0 if you want all posts
-
+DEFAULT_OUTPUT_DIRECTORY_FORMAT = "$publication_domain"
+DEFAULT_IMAGE_PATH_FORMAT = "p/$post_slug/images/$image_filename"
+DEFAULT_MD_PATH_FORMAT = "p/$post_slug/readme.md"
+DEFAULT_HTML_PATH_FORMAT = "p/$post_slug/index.html"
+DEFAULT_POSTS_HTML_PATH_FORMAT = "index.html"
+DEFAULT_POSTS_JSON_PATH_FORMAT = "posts.json"
+DEFAULT_POST_JSON_PATH_FORMAT = "p/$post_slug/post.json"
+DEFAULT_COMMENTS_JSON_PATH_FORMAT = "p/$post_slug/comments.json"
 
 def count_images_in_markdown(md_content: str) -> int:
     """Count number of Substack CDN image URLs in markdown content."""
@@ -80,37 +87,6 @@ def extract_main_part(url: str) -> str:
     # present
 
 
-def generate_html_file(args, author_name: str) -> None:
-    """
-    Generates a HTML file for the given author.
-    """
-    if not os.path.exists(args.html_directory):
-        os.makedirs(args.html_directory)
-
-    # Read JSON data
-    json_path = os.path.join(JSON_DATA_DIR, f'{author_name}.json')
-    with open(json_path, 'r', encoding='utf-8') as file:
-        essays_data = json.load(file)
-
-    # Convert JSON data to a JSON string for embedding
-    embedded_json_data = json.dumps(essays_data, ensure_ascii=False, indent=4)
-
-    with open(args.author_template, 'r', encoding='utf-8') as file:
-        html_template = file.read()
-
-    # Insert the JSON string into the script tag in the HTML template
-    html_with_data = html_template.replace('<!-- AUTHOR_NAME -->', author_name).replace(
-        '<script type="application/json" id="essaysData"></script>',
-        f'<script type="application/json" id="essaysData">{embedded_json_data}</script>'
-    )
-    html_with_author = html_with_data.replace('author_name', author_name)
-
-    # Write the modified HTML to a new file
-    html_output_path = os.path.join(args.html_directory, f'{author_name}.html')
-    with open(html_output_path, 'w', encoding='utf-8') as file:
-        file.write(html_with_author)
-
-
 class BaseSubstackScraper(ABC):
     def __await__(self):
         return self._async_init().__await__()
@@ -121,32 +97,28 @@ class BaseSubstackScraper(ABC):
     async def __aexit__(self, exc_type, exc, tb):
         pass
 
-    def __init__(self, args, base_substack_url: str, md_save_dir: str, html_save_dir: str):
-        if not base_substack_url.endswith("/"):
-            base_substack_url += "/"
+    def __init__(self, args):
         self.args = args
-        self.base_substack_url: str = base_substack_url
+        if not self.args.url.endswith("/"):
+            self.args.url += "/"
 
-        self.writer_name: str = extract_main_part(base_substack_url)
-        md_save_dir: str = f"{md_save_dir}/{self.writer_name}"
+        self.publication_handle: str = extract_main_part(self.args.url)
 
-        self.md_save_dir: str = md_save_dir
-        self.html_save_dir: str = f"{html_save_dir}/{self.writer_name}"
+        self.output_directory_template = string.Template(self.args.output_directory_format)
 
-        self.args.json_directory += f"/{self.writer_name}"
+        # all these paths are relative to output_directory
+        self.md_path_template = string.Template(self.args.md_path_format)
+        self.html_path_template = string.Template(self.args.html_path_format)
+        self.image_path_template = string.Template(self.args.image_path_format)
+        self.posts_html_path_template = string.Template(self.args.posts_html_path_format)
+        self.posts_json_path_template = string.Template(self.args.posts_json_path_format)
+        self.post_json_path_template = string.Template(self.args.post_json_path_format)
+        self.comments_json_path_template = string.Template(self.args.comments_json_path_format)
 
-        if not os.path.exists(md_save_dir):
-            os.makedirs(md_save_dir)
-            print(f"Created md directory {md_save_dir}")
-        if not os.path.exists(self.html_save_dir):
-            os.makedirs(self.html_save_dir)
-            print(f"Created html directory {self.html_save_dir}")
-
-        if not self.args.no_images:
-            os.makedirs(self.args.image_directory, exist_ok=True)
-
-        if not self.args.no_json:
-            os.makedirs(self.args.json_directory, exist_ok=True)
+        self.format_vars = {
+            "publication_handle": self.publication_handle,
+            "publication_domain": f"{self.publication_handle}.substack.com",
+        }
 
         self.keywords: List[str] = ["about", "archive", "podcast"]
         self.post_urls: List[str] = self.get_all_post_urls()
@@ -168,7 +140,7 @@ class BaseSubstackScraper(ABC):
         """
         Fetches URLs from sitemap.xml.
         """
-        sitemap_url = f"{self.base_substack_url}sitemap.xml"
+        sitemap_url = f"{self.args.url}sitemap.xml"
         response = requests.get(sitemap_url)
 
         if not response.ok:
@@ -184,7 +156,7 @@ class BaseSubstackScraper(ABC):
         Fetches URLs from feed.xml.
         """
         print('Falling back to feed.xml. This will only contain up to the 22 most recent posts.')
-        feed_url = f"{self.base_substack_url}feed.xml"
+        feed_url = f"{self.args.url}feed.xml"
         response = requests.get(feed_url)
 
         if not response.ok:
@@ -258,7 +230,9 @@ class BaseSubstackScraper(ABC):
 
         # Calculate the relative path from the HTML file to the CSS file
         html_dir = os.path.dirname(filepath)
-        css_path = os.path.relpath(self.args.assets_dir + "/css/essay-styles.css", html_dir)
+        css_path = self.args.assets_dir + "/css/essay-styles.css"
+        if not os.path.isabs(css_path):
+            css_path = os.path.relpath(css_path, html_dir)
         css_path = css_path.replace("\\", "/")  # Ensure forward slashes for web paths
 
         html_content = f"""
@@ -490,35 +464,55 @@ class BaseSubstackScraper(ABC):
     def get_url_soup(self, url: str) -> str:
         raise NotImplementedError
 
-    def save_essays_data_to_json(self, essays_data: list) -> None:
+    def save_posts_data_json(self, posts_data: list) -> None:
         """
         Saves essays data to a JSON file for a specific author.
         """
-        data_dir = os.path.join(JSON_DATA_DIR)
-        if not os.path.exists(data_dir):
-            os.makedirs(data_dir)
-
-        json_path = os.path.join(data_dir, f'{self.writer_name}.json')
-        if os.path.exists(json_path):
-            with open(json_path, 'r', encoding='utf-8') as file:
+        posts_json_path = os.path.join(
+            self.format_vars["output_directory"],
+            self.posts_json_path_template.substitute(self.format_vars)
+        )
+        os.makedirs(os.path.dirname(posts_json_path), exist_ok=True)
+        if os.path.exists(posts_json_path):
+            with open(posts_json_path, 'r', encoding='utf-8') as file:
                 existing_data = json.load(file)
-            essays_data = existing_data + [data for data in essays_data if data not in existing_data]
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(essays_data, f, ensure_ascii=False, indent=4)
+            # remove duplicates from existing_data
+            new_post_ids = set(map(lambda p: p["id"], posts_data))
+            existing_data = [p for p in posts_data if p["id"] not in new_post_ids]
+            posts_data = existing_data + posts_data
+        # sort by post_id, descending
+        posts_data.sort(key=lambda p: -1*p["id"])
+        with open(posts_json_path, 'w', encoding='utf-8') as f:
+            json.dump(posts_data, f, ensure_ascii=False, separators=(',', ':'))
 
     async def scrape_posts(self, num_posts_to_scrape: int = 0) -> None:
         """
         Iterates over all posts and saves them as markdown and html files
         """
-        essays_data = []
+        posts_data = []
         count = 0
         total = num_posts_to_scrape if num_posts_to_scrape != 0 else len(self.post_urls)
         for url in tqdm(self.post_urls, total=total):
             try:
-                md_filename = self.get_filename_from_url(url, filetype=".md")
-                html_filename = self.get_filename_from_url(url, filetype=".html")
-                md_filepath = os.path.join(self.md_save_dir, md_filename)
-                html_filepath = os.path.join(self.html_save_dir, html_filename)
+                post_slug = url.split("/")[-1]
+                self.format_vars["post_slug"] = post_slug
+
+                output_directory = self.output_directory_template.substitute(self.format_vars)
+                self.format_vars["output_directory"] = output_directory
+
+                md_filepath = os.path.join(
+                    output_directory,
+                    self.md_path_template.substitute(self.format_vars)
+                )
+                self.format_vars["md_filepath"] = md_filepath
+                self.format_vars["md_directory"] = os.path.dirname(md_filepath)
+
+                html_filepath = os.path.join(
+                    output_directory,
+                    self.html_path_template.substitute(self.format_vars)
+                )
+                self.format_vars["html_filepath"] = html_filepath
+                self.format_vars["html_directory"] = os.path.dirname(html_filepath)
 
                 # if not os.path.exists(md_filepath):
                 if True:
@@ -527,12 +521,14 @@ class BaseSubstackScraper(ABC):
                         total += 1
                         continue
                     title, subtitle, like_count, date, md = self.extract_post_data(soup)
+                    post_preloads = await self.get_window_preloads(soup)
+
+                    post_id = post_preloads["post"]["id"]
 
                     if not self.args.no_images:
                         total_images = count_images_in_markdown(md)
-                        post_slug = get_post_slug(url)
                         with tqdm(total=total_images, desc=f"Downloading images for {post_slug}", leave=False) as img_pbar:
-                            md = await self.process_markdown_images(md, self.writer_name, post_slug, img_pbar)
+                            md = await self.process_markdown_images(md, img_pbar)
 
                     comments_html = None
                     comments_num = None
@@ -542,8 +538,10 @@ class BaseSubstackScraper(ABC):
                         comments_soup = await self.get_url_soup(comments_url)
                         comments_preloads = await self.get_window_preloads(comments_soup)
                         if not self.args.no_json:
-                            json_filename = self.get_filename_from_url(url, filetype=".comments.json")
-                            json_filepath = os.path.join(self.args.json_directory, json_filename)
+                            json_filepath = os.path.join(
+                                output_directory,
+                                self.comments_json_path_template.substitute(self.format_vars)
+                            )
                             _json = json.dumps(comments_preloads, ensure_ascii=False, separators=(',', ':'))
                             self.save_to_file(json_filepath, _json)
                         comments_num = self.count_comments(comments_preloads)
@@ -567,9 +565,10 @@ class BaseSubstackScraper(ABC):
                     self.save_to_file(md_filepath, md)
 
                     if not self.args.no_json:
-                        post_preloads = await self.get_window_preloads(soup)
-                        json_filename = self.get_filename_from_url(url, filetype=".post.json")
-                        json_filepath = os.path.join(self.args.json_directory, json_filename)
+                        json_filepath = os.path.join(
+                            output_directory,
+                            self.post_json_path_template.substitute(self.format_vars)
+                        )
                         _json = json.dumps(post_preloads, ensure_ascii=False, separators=(',', ':'))
                         self.save_to_file(json_filepath, _json)
 
@@ -577,7 +576,8 @@ class BaseSubstackScraper(ABC):
                     html_content = self.md_to_html(md)
                     self.save_to_html_file(html_filepath, html_content)
 
-                    essays_data.append({
+                    posts_data.append({
+                        "id": post_id,
                         "title": title,
                         "subtitle": subtitle,
                         "like_count": like_count,
@@ -594,8 +594,51 @@ class BaseSubstackScraper(ABC):
             count += 1
             if num_posts_to_scrape != 0 and count == num_posts_to_scrape:
                 break
-        self.save_essays_data_to_json(essays_data=essays_data)
-        generate_html_file(self.args, author_name=self.writer_name)
+        self.save_posts_data_json(posts_data)
+        self.generate_main_html_file()
+
+    def generate_main_html_file(self) -> None:
+        """
+        Generates a HTML file for the given author.
+        """
+        # Read JSON data
+        posts_json_path = os.path.join(
+            self.format_vars["output_directory"],
+            self.posts_json_path_template.substitute(self.format_vars)
+        )
+        with open(posts_json_path, 'r', encoding='utf-8') as file:
+            posts_data = json.load(file)
+
+        # Convert JSON data to a JSON string for embedding
+        embedded_json_data = json.dumps(posts_data, ensure_ascii=False, separators=(',', ':'))
+
+        html_output_path = os.path.join(
+            self.format_vars["output_directory"],
+            self.posts_html_path_template.substitute(self.format_vars)
+        )
+
+        with open(self.args.author_template, 'r', encoding='utf-8') as file:
+            html_template = file.read()
+
+        html_with_data = html_template
+
+        # patch assets path
+        assets_path = self.args.assets_dir
+        if not os.path.isabs(assets_path):
+            assets_path = os.path.relpath(assets_path, os.path.dirname(html_output_path))
+        html_with_data = html_with_data.replace('"../assets', f'"{assets_path}')
+
+        html_with_data = html_with_data.replace('<!-- AUTHOR_NAME -->', self.publication_handle)
+
+        # Insert the JSON string into the script tag in the HTML template
+        html_with_data = html_with_data.replace(
+            '<script type="application/json" id="essaysData"></script>',
+            f'<script type="application/json" id="essaysData">{embedded_json_data}</script>'
+        )
+
+        # Write the modified HTML to a new file
+        with open(html_output_path, 'w', encoding='utf-8') as file:
+            file.write(html_with_data)
 
     async def download_image(
             self,
@@ -624,12 +667,10 @@ class BaseSubstackScraper(ABC):
     async def process_markdown_images(
             self,
             md_content: str,
-            author: str,
-            post_slug: str,
             pbar=None
         ) -> str:
         """Process markdown content to download images and update references."""
-        image_dir = Path(self.args.image_directory) / author / post_slug
+        output_directory = self.format_vars["output_directory"]
         # [![](https://substackcdn.com/image/fetch/x.png)](https://substackcdn.com/image/fetch/x.png)
         pattern = re.compile(r'\(https://substackcdn\.com/image/fetch/[^\s\)]+\)')
         buf = io.StringIO()
@@ -638,10 +679,20 @@ class BaseSubstackScraper(ABC):
             buf.write(md_content[last_end:match.start()])
             url = match.group(0).strip("()")
             filename = sanitize_image_filename(url)
-            save_path = image_dir / filename
+            format_vars = {
+                **self.format_vars,
+                "image_filename": filename,
+            }
+            save_path = Path(os.path.join(
+                output_directory,
+                self.image_path_template.substitute(format_vars)
+            ))
             if not save_path.exists():
                 await self.download_image(url, save_path, pbar)
-            rel_path = os.path.relpath(save_path, Path(self.args.directory) / author)
+            md_directory = self.format_vars["md_directory"]
+            rel_path = save_path
+            if not os.path.isabs(rel_path):
+                rel_path = os.path.relpath(save_path, md_directory)
             buf.write(f"({rel_path})")
             last_end = match.end()
         buf.write(md_content[last_end:])
@@ -649,8 +700,8 @@ class BaseSubstackScraper(ABC):
 
 
 class SubstackScraper(BaseSubstackScraper):
-    def __init__(self, args, base_substack_url: str, md_save_dir: str, html_save_dir: str):
-        super().__init__(args, base_substack_url, md_save_dir, html_save_dir)
+    def __init__(self, args):
+        super().__init__(args, self.args.url)
 
     def get_url_soup(self, url: str) -> Optional[BeautifulSoup]:
         """
@@ -668,17 +719,8 @@ class SubstackScraper(BaseSubstackScraper):
 
 
 class PremiumSubstackScraper(BaseSubstackScraper):
-    def __init__(
-        self,
-        args,
-        base_substack_url: str,
-        md_save_dir: str,
-        html_save_dir: str,
-        headless: bool = False,
-        chromium_path: str = '',
-        user_agent: str = ''
-    ) -> None:
-        super().__init__(args, base_substack_url, md_save_dir, html_save_dir)
+    def __init__(self, args) -> None:
+        super().__init__(args)
 
         self.driver = None
 
@@ -698,13 +740,13 @@ class PremiumSubstackScraper(BaseSubstackScraper):
 
         options = webdriver.ChromeOptions()
         self.chrome_options = options
-        if headless:
+        if self.args.headless:
             # modern headless flag (works better with recent Chromium)
             options.add_argument("--headless=new")
-        if chromium_path:
-            options.binary_location = chromium_path
-        if user_agent:
-            options.add_argument(f"user-agent={user_agent}")
+        if self.args.chromium_path:
+            options.binary_location = self.args.chromium_path
+        if self.args.user_agent:
+            options.add_argument(f"user-agent={self.args.user_agent}")
 
     async def _async_init(self):
         self._loop = asyncio.get_running_loop()
@@ -869,13 +911,6 @@ def parse_args() -> argparse.Namespace:
         help="The base URL of the Substack site to scrape."
     )
     parser.add_argument(
-        "-d",
-        "--directory", # args.directory
-        type=str,
-        default=BASE_MD_DIR,
-        help="The directory to save scraped posts."
-    )
-    parser.add_argument(
         "-n",
         "--number", # args.number
         type=int,
@@ -917,22 +952,53 @@ def parse_args() -> argparse.Namespace:
         "passing captcha in headless mode",
     )
     parser.add_argument(
-        "--html-directory", # args.html_directory
+        "--output-directory-format", # args.output_directory_format
         type=str,
-        default=BASE_HTML_DIR,
-        help=f"The directory to save scraped posts as HTML files. Default: {BASE_HTML_DIR!r}",
+        default=DEFAULT_OUTPUT_DIRECTORY_FORMAT,
+        # all relative output file paths are relative to this directory
+        help=f"The file path format of the directory to save output files. Default: {DEFAULT_OUTPUT_DIRECTORY_FORMAT!r}",
     )
     parser.add_argument(
-        "--image-directory", # args.image_directory
+        "--md-path-format", # args.md_path_format
         type=str,
-        default=BASE_IMAGE_DIR,
-        help=f"The directory to save scraped image files. Default: {BASE_IMAGE_DIR!r}",
+        default=DEFAULT_MD_PATH_FORMAT,
+        help=f"The file path format to save scraped posts as Markdown files. Default: {DEFAULT_MD_PATH_FORMAT!r}",
     )
     parser.add_argument(
-        "--json-directory", # args.json_directory
+        "--html-path-format", # args.html_path_format
         type=str,
-        default=BASE_JSON_DIR,
-        help=f"The directory to save scraped JSON files. Default: {BASE_JSON_DIR!r}",
+        default=DEFAULT_HTML_PATH_FORMAT,
+        help=f"The file path format to save scraped posts as HTML files. Default: {DEFAULT_HTML_PATH_FORMAT!r}",
+    )
+    parser.add_argument(
+        "--image-path-format", # args.image_path_format
+        type=str,
+        default=DEFAULT_IMAGE_PATH_FORMAT,
+        help=f"The file path format to save scraped image files. Default: {DEFAULT_IMAGE_PATH_FORMAT!r}",
+    )
+    parser.add_argument(
+        "--posts-html-path-format", # args.posts_html_path_format
+        type=str,
+        default=DEFAULT_POSTS_HTML_PATH_FORMAT,
+        help=f"The file path format to save an index of scraped posts as HTML file. Default: {DEFAULT_POSTS_HTML_PATH_FORMAT!r}",
+    )
+    parser.add_argument(
+        "--posts-json-path-format", # args.posts_json_path_format
+        type=str,
+        default=DEFAULT_POSTS_JSON_PATH_FORMAT,
+        help=f"The file path format to save metadata of scraped posts as JSON file. Default: {DEFAULT_POSTS_JSON_PATH_FORMAT!r}",
+    )
+    parser.add_argument(
+        "--post-json-path-format", # args.post_json_path_format
+        type=str,
+        default=DEFAULT_POST_JSON_PATH_FORMAT,
+        help=f"The file path format to save scraped posts as JSON files. Default: {DEFAULT_POST_JSON_PATH_FORMAT!r}",
+    )
+    parser.add_argument(
+        "--comments-json-path-format", # args.comments_json_path_format
+        type=str,
+        default=DEFAULT_COMMENTS_JSON_PATH_FORMAT,
+        help=f"The file path format to save scraped comments as JSON files. Default: {DEFAULT_COMMENTS_JSON_PATH_FORMAT!r}",
     )
     parser.add_argument(
         "--no-images", # args.no_images
@@ -971,20 +1037,9 @@ async def async_main():
 
     if True:
         if args.premium:
-            scraper = await PremiumSubstackScraper(
-                args=args,
-                base_substack_url=args.url,
-                headless=args.headless,
-                md_save_dir=args.directory,
-                html_save_dir=args.html_directory
-            )
+            scraper = await PremiumSubstackScraper(args)
         else:
-            scraper = await SubstackScraper(
-                args=args,
-                base_substack_url=args.url,
-                md_save_dir=args.directory,
-                html_save_dir=args.html_directory
-            )
+            scraper = await SubstackScraper(args)
 
         await scraper.scrape_posts(args.number)
         await scraper.close()
