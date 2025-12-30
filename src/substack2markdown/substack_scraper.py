@@ -101,6 +101,9 @@ class BaseSubstackScraper(ABC):
         return await self
 
     async def __aexit__(self, exc_type, exc, tb):
+        await self.close()
+
+    async def close(self):
         pass
 
     def __init__(self, args):
@@ -706,10 +709,7 @@ class BaseSubstackScraper(ABC):
 
 
 class SubstackScraper(BaseSubstackScraper):
-    def __init__(self, args):
-        super().__init__(args, self.args.url)
-
-    def get_url_soup(self, url: str) -> Optional[BeautifulSoup]:
+    async def get_url_soup(self, url: str) -> Optional[BeautifulSoup]:
         """
         Gets soup from URL using requests
         """
@@ -763,9 +763,6 @@ class PremiumSubstackScraper(BaseSubstackScraper):
 
     async def _start_driver(self):
         self.driver = await webdriver.Chrome(options=self.chrome_options)
-
-    async def __aexit__(self, exc_type, exc, tb):
-        await self.close()
 
     async def close(self) -> None:
         if self.driver:
