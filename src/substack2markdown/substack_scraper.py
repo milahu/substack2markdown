@@ -371,6 +371,7 @@ class BaseSubstackScraper(ABC):
             if like_count_element and like_count_element.text.strip().isdigit()
             else "0"
         )
+        like_count = int(like_count)
 
         # Post content
         content_element = soup.select_one("div.available-content")
