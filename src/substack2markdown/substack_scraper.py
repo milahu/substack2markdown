@@ -569,6 +569,18 @@ class BaseSubstackScraper(ABC):
                 self.format_vars["html_filepath"] = html_filepath
                 self.format_vars["html_directory"] = os.path.dirname(html_filepath)
 
+                post_json_filepath = None
+                comments_json_filepath = None
+                if not self.args.no_json:
+                    post_json_filepath = os.path.join(
+                        output_directory,
+                        self.post_json_path_template.substitute(self.format_vars)
+                    )
+                    comments_json_filepath = os.path.join(
+                        output_directory,
+                        self.comments_json_path_template.substitute(self.format_vars)
+                    )
+
                 # if not os.path.exists(md_filepath):
                 if self.args.offline:
                     json_filepath = os.path.join(
@@ -650,7 +662,7 @@ class BaseSubstackScraper(ABC):
                     html_content = self.md_to_html(md)
                     self.save_to_html_file(html_filepath, html_content)
 
-                    posts_data.append({
+                    post = {
                         "id": post_id,
                         "slug": post_preloads["post"]["slug"],
                         "title": title,
@@ -661,7 +673,13 @@ class BaseSubstackScraper(ABC):
                         "date": date,
                         "file_link": os.path.relpath(md_filepath, posts_json_dir),
                         "html_link": os.path.relpath(html_filepath, posts_json_dir),
-                    })
+                    }
+
+                    if not self.args.no_json:
+                        post["post_json"] = os.path.relpath(post_json_filepath, posts_json_dir)
+                        post["comments_json"] = os.path.relpath(comments_json_filepath, posts_json_dir)
+
+                    posts_data.append(post)
                 else:
                     print(f"File already exists: {md_filepath}")
             except Exception as e:
