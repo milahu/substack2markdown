@@ -140,10 +140,31 @@ class BaseSubstackScraper(ABC):
         """
         Attempts to fetch URLs from sitemap.xml, falling back to feed.xml if necessary.
         """
+        if self.args.offline:
+            return self.get_all_post_urls_offline()
         urls = self.fetch_urls_from_sitemap()
         if not urls:
             urls = self.fetch_urls_from_feed()
         return self.filter_urls(urls, self.keywords)
+
+    def get_all_post_urls_offline(self) -> List[str]:
+        # Read JSON data
+        # NOTE this assumes that $post_slug is not used in args.output_directory_format
+        # because post_slug is undefined at this point
+        output_directory = self.output_directory_template.substitute(self.format_vars)
+        self.format_vars["output_directory"] = output_directory
+        posts_json_path = os.path.join(
+            # self.format_vars["output_directory"] = 
+            self.format_vars["output_directory"],
+            self.posts_json_path_template.substitute(self.format_vars)
+        )
+        with open(posts_json_path, 'r', encoding='utf-8') as file:
+            posts_data = json.load(file)
+        urls = []
+        for post in posts_data:
+            post["slug"] = post["html_link"].split("/")[-2] # FIXME remove
+            urls.append(self.args.url + "p/" + post["slug"])
+        return urls
 
     def fetch_urls_from_sitemap(self) -> List[str]:
         """
@@ -352,6 +373,27 @@ class BaseSubstackScraper(ABC):
 
         return title, subtitle, like_count, date, md_content
 
+    def extract_post_data_from_preloads(self, post_preloads):
+
+        title = post_preloads["post"]["title"]
+
+        subtitle = post_preloads["post"]["description"]
+
+        like_count = post_preloads["post"]["reactions"]["❤"]
+
+        # TODO expose date format
+        datetime_format = "%b %d, %Y" # "Oct 01, 2025"
+
+        date = post_preloads["post"]["post_date"] # date in ISO format: "2025-10-01T14:43:48.389Z"
+        date = datetime.strptime(date, "%Y-%m-%dT%H:%M:%S.%fZ").strftime(datetime_format)
+
+        content_html = post_preloads["post"]["body_html"]
+        md = self.html_to_md(content_html)
+        # Combine metadata + content
+        md_content = self.combine_metadata_and_content(title, subtitle, date, like_count, md)
+
+        return title, subtitle, like_count, date, md_content
+
     async def get_window_preloads(self, soup):
         # all comments are stored in javascript
         # <script>window._preloads = JSON.parse("{\"isEU\":true,\"language\":\"en\",...}")</script>
@@ -470,7 +512,7 @@ class BaseSubstackScraper(ABC):
         return buf.getvalue()
 
     @abstractmethod
-    def get_url_soup(self, url: str) -> str:
+    async def get_url_soup(self, url: str) -> str:
         raise NotImplementedError
 
     def save_posts_data_json(self, posts_data: list) -> None:
@@ -524,7 +566,15 @@ class BaseSubstackScraper(ABC):
                 self.format_vars["html_directory"] = os.path.dirname(html_filepath)
 
                 # if not os.path.exists(md_filepath):
-                if True:
+                if self.args.offline:
+                    json_filepath = os.path.join(
+                        output_directory,
+                        self.post_json_path_template.substitute(self.format_vars)
+                    )
+                    with open(json_filepath) as f:
+                        post_preloads = json.load(f)
+                    title, subtitle, like_count, date, md = self.extract_post_data_from_preloads(post_preloads)
+                else:
                     soup = await self.get_url_soup(url)
                     if soup is None:
                         total += 1
@@ -532,20 +582,31 @@ class BaseSubstackScraper(ABC):
                     title, subtitle, like_count, date, md = self.extract_post_data(soup)
                     post_preloads = await self.get_window_preloads(soup)
 
+                if True:
                     post_id = post_preloads["post"]["id"]
 
+                if True:
                     if not self.args.no_images:
                         total_images = count_images_in_markdown(md)
                         with tqdm(total=total_images, desc=f"Downloading images for {post_slug}", leave=False) as img_pbar:
                             md = await self.process_markdown_images(md, img_pbar)
 
+                if True:
                     comments_html = None
                     comments_num = None
                     if not self.args.no_comments:
                         comments_url = url + "/comments"
                         # comments_url = "https://willstorr.substack.com/p/scamming-substack/comments" # test
-                        comments_soup = await self.get_url_soup(comments_url)
-                        comments_preloads = await self.get_window_preloads(comments_soup)
+                        if self.args.offline:
+                            json_filepath = os.path.join(
+                                output_directory,
+                                self.comments_json_path_template.substitute(self.format_vars)
+                            )
+                            with open(json_filepath) as f:
+                                comments_preloads = json.load(f)
+                        else:
+                            comments_soup = await self.get_url_soup(comments_url)
+                            comments_preloads = await self.get_window_preloads(comments_soup)
                         if not self.args.no_json:
                             json_filepath = os.path.join(
                                 output_directory,
@@ -587,6 +648,7 @@ class BaseSubstackScraper(ABC):
 
                     posts_data.append({
                         "id": post_id,
+                        "slug": post_preloads["post"]["slug"],
                         "title": title,
                         "subtitle": subtitle,
                         "like_count": like_count,
@@ -696,7 +758,7 @@ class BaseSubstackScraper(ABC):
                 output_directory,
                 self.image_path_template.substitute(format_vars)
             ))
-            if not save_path.exists():
+            if not save_path.exists() and not self.args.offline:
                 await self.download_image(url, save_path, pbar)
             md_directory = self.format_vars["md_directory"]
             rel_path = save_path
@@ -921,6 +983,11 @@ def parse_args() -> argparse.Namespace:
         help="The number of posts to scrape. If 0 or not provided, all posts will be scraped.",
     )
     parser.add_argument(
+        "--offline", # args.offline
+        action="store_true",
+        help="Use existing JSON files to render Markdown and HTML files.",
+    )
+    parser.add_argument(
         "-p",
         "--premium",
         action="store_true",
@@ -1039,7 +1106,9 @@ async def async_main():
         args.author_template = args.assets_dir + "/" + HTML_TEMPLATE
 
     if True:
-        if args.premium:
+        if args.offline:
+            scraper = await SubstackScraper(args)
+        elif args.premium:
             scraper = await PremiumSubstackScraper(args)
         else:
             scraper = await SubstackScraper(args)
