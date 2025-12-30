@@ -381,11 +381,10 @@ class BaseSubstackScraper(ABC):
 
         like_count = post_preloads["post"]["reactions"]["❤"]
 
-        # TODO expose date format
-        datetime_format = "%b %d, %Y" # "Oct 01, 2025"
-
         date = post_preloads["post"]["post_date"] # date in ISO format: "2025-10-01T14:43:48.389Z"
-        date = datetime.strptime(date, "%Y-%m-%dT%H:%M:%S.%fZ").strftime(datetime_format)
+
+        # datetime_format = "%b %d, %Y" # "Oct 01, 2025"
+        # date = datetime.strptime(date, "%Y-%m-%dT%H:%M:%S.%fZ").strftime(datetime_format)
 
         content_html = post_preloads["post"]["body_html"]
         md = self.html_to_md(content_html)
@@ -599,6 +598,7 @@ class BaseSubstackScraper(ABC):
                         continue
                     title, subtitle, like_count, date, md = self.extract_post_data(soup)
                     post_preloads = await self.get_window_preloads(soup)
+                    date = post_preloads["post"]["post_date"] # date in ISO format: "2025-10-01T14:43:48.389Z"
 
                 if True:
                     post_id = post_preloads["post"]["id"]
