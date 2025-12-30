@@ -657,6 +657,7 @@ class BaseSubstackScraper(ABC):
                         "subtitle": subtitle,
                         "like_count": like_count,
                         "comment_count": comments_num,
+                        "repost_count": post_preloads["post"]["restacks"],
                         "date": date,
                         "file_link": os.path.relpath(md_filepath, posts_json_dir),
                         "html_link": os.path.relpath(html_filepath, posts_json_dir),
