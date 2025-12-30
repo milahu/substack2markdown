@@ -842,12 +842,12 @@ class BaseSubstackScraper(ABC):
         """Process markdown content to download images and update references."""
         output_directory = self.format_vars["output_directory"]
         # [![](https://substackcdn.com/image/fetch/x.png)](https://substackcdn.com/image/fetch/x.png)
-        pattern = re.compile(r'\(https://substackcdn\.com/image/fetch/[^\s\)]+\)')
+        pattern = re.compile(r'\((https://substackcdn\.com/image/fetch/[^\s\)]+)\)')
         buf = io.StringIO()
         last_end = 0
         for match in pattern.finditer(md_content):
             buf.write(md_content[last_end:match.start()])
-            url = match.group(0).strip("()")
+            url = match.group(1)
             filename = sanitize_image_filename(url)
             format_vars = {
                 **self.format_vars,
