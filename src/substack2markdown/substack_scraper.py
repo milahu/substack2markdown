@@ -83,6 +83,15 @@ def sanitize_image_filename(url: str) -> str:
     return filename
 
 
+def resolve_image_url(url: str) -> str:
+    """Get the original image URL."""
+    # https://substackcdn.com/image/fetch/xxx/https%3A%2F%2Fsubstack-post-media.s3.amazonaws.com%2Fpublic%2Fimages%2Fxxx
+    if url.startswith("https://substackcdn.com/image/fetch/"):
+        # substackcdn.com returns a compressed version of the original image
+        url = "https://" + unquote(url.split("/https%3A%2F%2F")[1])
+    return url
+
+
 def get_post_slug(url: str) -> str:
     match = re.search(r'/p/([^/]+)', url)
     return match.group(1) if match else 'unknown_post'
@@ -848,6 +857,7 @@ class BaseSubstackScraper(ABC):
         for match in pattern.finditer(md_content):
             buf.write(md_content[last_end:match.start()])
             url = match.group(1)
+            url = resolve_image_url(url)
             filename = sanitize_image_filename(url)
             format_vars = {
                 **self.format_vars,
