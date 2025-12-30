@@ -149,8 +149,6 @@ class BaseSubstackScraper(ABC):
 
     def get_all_post_urls_offline(self) -> List[str]:
         # Read JSON data
-        # NOTE this assumes that $post_slug is not used in args.output_directory_format
-        # because post_slug is undefined at this point
         output_directory = self.output_directory_template.substitute(self.format_vars)
         self.format_vars["output_directory"] = output_directory
         posts_json_path = os.path.join(
@@ -540,6 +538,15 @@ class BaseSubstackScraper(ABC):
         """
         Iterates over all posts and saves them as markdown and html files
         """
+        output_directory = self.output_directory_template.substitute(self.format_vars)
+        self.format_vars["output_directory"] = output_directory
+
+        posts_json_path = os.path.join(
+            self.format_vars["output_directory"],
+            self.posts_json_path_template.substitute(self.format_vars)
+        )
+        posts_json_dir = os.path.dirname(posts_json_path)
+
         posts_data = []
         count = 0
         total = num_posts_to_scrape if num_posts_to_scrape != 0 else len(self.post_urls)
@@ -547,9 +554,6 @@ class BaseSubstackScraper(ABC):
             try:
                 post_slug = url.split("/")[-1]
                 self.format_vars["post_slug"] = post_slug
-
-                output_directory = self.output_directory_template.substitute(self.format_vars)
-                self.format_vars["output_directory"] = output_directory
 
                 md_filepath = os.path.join(
                     output_directory,
@@ -654,8 +658,8 @@ class BaseSubstackScraper(ABC):
                         "like_count": like_count,
                         "comment_count": comments_num,
                         "date": date,
-                        "file_link": md_filepath,
-                        "html_link": html_filepath
+                        "file_link": os.path.relpath(md_filepath, posts_json_dir),
+                        "html_link": os.path.relpath(html_filepath, posts_json_dir),
                     })
                 else:
                     print(f"File already exists: {md_filepath}")
