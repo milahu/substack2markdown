@@ -40,6 +40,7 @@ DEFAULT_OUTPUT_DIRECTORY_FORMAT = "$publication_domain"
 DEFAULT_IMAGE_PATH_FORMAT = "p/$post_slug/images/$image_filename"
 DEFAULT_MD_PATH_FORMAT = "p/$post_slug/readme.md"
 DEFAULT_HTML_PATH_FORMAT = "p/$post_slug/index.html"
+DEFAULT_POSTS_MD_PATH_FORMAT = "readme.md"
 DEFAULT_POSTS_HTML_PATH_FORMAT = "index.html"
 DEFAULT_POSTS_JSON_PATH_FORMAT = "posts.json"
 DEFAULT_POST_JSON_PATH_FORMAT = "p/$post_slug/post.json"
@@ -119,6 +120,7 @@ class BaseSubstackScraper(ABC):
         self.md_path_template = string.Template(self.args.md_path_format)
         self.html_path_template = string.Template(self.args.html_path_format)
         self.image_path_template = string.Template(self.args.image_path_format)
+        self.posts_md_path_template = string.Template(self.args.posts_md_path_format)
         self.posts_html_path_template = string.Template(self.args.posts_html_path_format)
         self.posts_json_path_template = string.Template(self.args.posts_json_path_format)
         self.post_json_path_template = string.Template(self.args.post_json_path_format)
@@ -689,7 +691,76 @@ class BaseSubstackScraper(ABC):
             if num_posts_to_scrape != 0 and count == num_posts_to_scrape:
                 break
         self.save_posts_data_json(posts_data)
+        self.generate_main_md_file()
         self.generate_main_html_file()
+
+    def generate_main_md_file(self) -> None:
+        """
+        Generates a Markdown file for the given author.
+        """
+        # Read JSON data
+        posts_json_path = os.path.join(
+            self.format_vars["output_directory"],
+            self.posts_json_path_template.substitute(self.format_vars)
+        )
+        with open(posts_json_path, 'r', encoding='utf-8') as file:
+            posts_data = json.load(file)
+
+        # sort by post_id, descending
+        posts_data.sort(key=lambda p: -1*p["id"])
+
+        last_post = posts_data[0]
+        last_post_json_path = last_post["post_json"]
+        last_post_json_path = os.path.join(
+            os.path.dirname(posts_json_path),
+            last_post_json_path
+        )
+
+        with open(last_post_json_path, 'r', encoding='utf-8') as file:
+            last_post = json.load(file)
+
+        publication = last_post["pub"]
+
+        md_output_path = os.path.join(
+            self.format_vars["output_directory"],
+            self.posts_md_path_template.substitute(self.format_vars)
+        )
+
+        with open(md_output_path, 'w', encoding='utf-8') as file:
+            file.write(f'# {publication["name"]}\n')
+            file.write('\n')
+            # author_url = f'https://substack.com/@{publication["author_handle"]}' # variable
+            author_url = f'https://substack.com/profile/{publication["author_id"]}' # constant
+            file.write(f'by [{publication["author_name"]}]({author_url})\n')
+            file.write('\n')
+            author_bio = publication["author_bio"].replace("\n", "\n\n")
+            file.write(f'{author_bio}\n')
+            file.write('\n')
+            file.write('\n')
+            file.write('\n')
+            file.write('## Posts\n')
+            file.write('\n')
+            for post in posts_data:
+                # TODO use args.datetime_format
+                post_date = post["date"]
+                post_link = (
+                    '<a id="post' +
+                    str(post["id"]) +
+                    '" href="' +
+                    post["file_link"] +
+                    '" title="' +
+                    post["subtitle"].replace('"', '&quot;') +
+                    '">' +
+                    post["title"].replace('<', '&lt;') +
+                    '</a>'
+                )
+                if post["like_count"] > 0:
+                    post_link += f" ❤" + str(post["like_count"]) # "❤123"
+                if post["comment_count"] > 0:
+                    post_link += f" 🗨" + str(post["comment_count"]) # "🗨123"
+                if post["repost_count"] > 0:
+                    post_link += f" ↻" + str(post["repost_count"]) # "↻123"
+                file.write(f'- {post_date} - {post_link}\n')
 
     def generate_main_html_file(self) -> None:
         """
@@ -705,6 +776,11 @@ class BaseSubstackScraper(ABC):
 
         # Convert JSON data to a JSON string for embedding
         embedded_json_data = json.dumps(posts_data, **json_dump_kwargs)
+
+        md_output_path = os.path.join(
+            self.format_vars["output_directory"],
+            self.posts_md_path_template.substitute(self.format_vars)
+        )
 
         html_output_path = os.path.join(
             self.format_vars["output_directory"],
@@ -1068,6 +1144,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=DEFAULT_IMAGE_PATH_FORMAT,
         help=f"The file path format to save scraped image files. Default: {DEFAULT_IMAGE_PATH_FORMAT!r}",
+    )
+    parser.add_argument(
+        "--posts-md-path-format", # args.posts_md_path_format
+        type=str,
+        default=DEFAULT_POSTS_MD_PATH_FORMAT,
+        help=f"The file path format to save an index of scraped posts as Markdown file. Default: {DEFAULT_POSTS_MD_PATH_FORMAT!r}",
     )
     parser.add_argument(
         "--posts-html-path-format", # args.posts_html_path_format
