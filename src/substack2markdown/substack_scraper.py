@@ -670,6 +670,10 @@ class BaseSubstackScraper(ABC):
 
                     # Convert markdown to HTML and save
                     html_content = self.md_to_html(md)
+                    # if self.args.offline:
+                    #     html_content = post_preloads["post"]["body_html"]
+                    # else:
+                    #     html_content = self.md_to_html(md)
                     self.save_to_html_file(html_filepath, html_content)
 
                     post = {
@@ -1087,11 +1091,16 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="The number of posts to scrape. If 0 or not provided, all posts will be scraped.",
     )
-    parser.add_argument(
-        "--offline", # args.offline
-        action="store_true",
-        help="Use existing JSON files to render Markdown and HTML files.",
-    )
+    # this was based on the wrong assumption
+    # that post_preloads JSON data contains the same body_html as the HTML page, but
+    # post_preloads["post"]["body_html"] contains HTML components with "data-attrs" attributes
+    # str(soup.select_one("div.available-content")) is clean HTML
+    # TODO convert HTML components to clean HTML
+    # parser.add_argument(
+    #     "--offline", # args.offline
+    #     action="store_true",
+    #     help="Use existing JSON files to render Markdown and HTML files.",
+    # )
     parser.add_argument(
         "-p",
         "--premium",
@@ -1202,6 +1211,8 @@ def parse_args() -> argparse.Namespace:
 
 async def async_main():
     args = parse_args()
+
+    args.offline = False
 
     if args.config:
         with open(args.config) as f:
