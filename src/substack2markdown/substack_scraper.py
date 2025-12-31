@@ -617,6 +617,8 @@ class BaseSubstackScraper(ABC):
                         with tqdm(total=total_images, desc=f"Downloading images for {post_slug}", leave=False) as img_pbar:
                             md = await self.process_markdown_images(md, img_pbar)
 
+                md = self.process_markdown_links(md)
+
                 if True:
                     comments_html = None
                     comments_num = None
@@ -877,6 +879,25 @@ class BaseSubstackScraper(ABC):
             last_end = match.end()
         buf.write(md_content[last_end:])
         return buf.getvalue()
+
+    def process_markdown_links(self, md_content):
+        # patch links to other posts of this publication
+        pattern = re.compile(r'\]\(https://' + self.publication_handle + r'\.substack\.com/p/([^\s\)]+)\)')
+        md_directory = self.format_vars["md_directory"]
+        output_directory = self.format_vars["output_directory"]
+        def get_replacement(match):
+            post_slug = match.group(1)
+            md_filepath = os.path.join(
+                output_directory,
+                self.md_path_template.substitute({
+                    **self.format_vars,
+                    "post_slug": post_slug,
+                })
+            )
+            md_filepath_rel = os.path.relpath(md_filepath, md_directory)
+            return '](' + md_filepath_rel + ')'
+        md_content = re.sub(pattern, get_replacement, md_content)
+        return md_content
 
 
 class SubstackScraper(BaseSubstackScraper):
