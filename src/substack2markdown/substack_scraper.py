@@ -559,9 +559,8 @@ class BaseSubstackScraper(ABC):
         posts_json_dir = os.path.dirname(posts_json_path)
 
         posts_data = []
-        count = 0
-        total = num_posts_to_scrape if num_posts_to_scrape != 0 else len(self.post_urls)
-        for url in tqdm(self.post_urls, total=total):
+        post_urls_slice = self.post_urls if num_posts_to_scrape == 0 else self.post_urls[:num_posts_to_scrape]
+        for url in tqdm(post_urls_slice):
             try:
                 post_slug = url.split("/")[-1]
                 self.format_vars["post_slug"] = post_slug
@@ -604,7 +603,6 @@ class BaseSubstackScraper(ABC):
                 else:
                     soup = await self.get_url_soup(url)
                     if soup is None:
-                        total += 1
                         continue
                     title, subtitle, like_count, date, md = self.extract_post_data(soup)
                     post_preloads = await self.get_window_preloads(soup)
@@ -697,9 +695,6 @@ class BaseSubstackScraper(ABC):
             except Exception as e:
                 print(f"Error scraping post: {e}")
                 # raise e # debug
-            count += 1
-            if num_posts_to_scrape != 0 and count == num_posts_to_scrape:
-                break
         self.save_posts_data_json(posts_data)
         self.generate_main_md_file()
         self.generate_main_html_file()
